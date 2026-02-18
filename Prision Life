@@ -1,0 +1,316 @@
+--[[
+    PRISION LIFE HUB - Rayfield Edition (baseado no seu script original)
+    Feito por Nicolas
+    Mesmas opções: AIM ASSIST, ESP, FOV + slider
+    Tecla K = Dica / foco no menu
+]]
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- Estado (igual ao seu)
+local State = {
+    HubVisible = false,
+    AimEnabled = false,
+    ESPEnabled = false,
+    FOVEnabled = false,
+    FOVRadius = 50,
+    Target = nil,
+    DrawingObjects = {}
+}
+
+-- Utils (copiei exatamente do seu script)
+local Utils = {}
+
+function Utils:CreateDrawing(type, properties)
+    local success, drawing = pcall(function()
+        local d = Drawing.new(type)
+        for prop, value in pairs(properties) do
+            d[prop] = value
+        end
+        return d
+    end)
+    if success then return drawing end
+    return nil
+end
+
+function Utils:GetPlayerRole(player)
+    if not player or not player.Character then return "Prisoner" end
+    local success, team = pcall(function() return player.Team end)
+    if success and team then
+        local teamName = team.Name:lower()
+        if teamName:find("guard") or teamName:find("police") then return "Guard" end
+        if teamName:find("criminal") then return "Criminal" end
+        if teamName:find("prison") then return "Prisoner" end
+    end
+    return "Prisoner"
+end
+
+function Utils:GetTeamColor(player)
+    local role = self:GetPlayerRole(player)
+    if role == "Guard" then return Color3.fromRGB(0, 100, 255) end
+    if role == "Criminal" then return Color3.fromRGB(255, 0, 0) end
+    return Color3.fromRGB(255, 140, 0)
+end
+
+function Utils:IsSameTeam(player1, player2)
+    if not player1 or not player2 then return false end
+    return self:GetPlayerRole(player1) == self:GetPlayerRole(player2)
+end
+
+function Utils:IsVisible(player)
+    if not player or not player.Character or not player.Character:FindFirstChild("Head") then return false end
+    local origin = Camera.CFrame.Position
+    local targetPos = player.Character.Head.Position
+    local direction = (targetPos - origin)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character or game, player.Character}
+    local result = workspace:Raycast(origin, direction, rayParams)
+    return not result
+end
+
+-- FOV Circle
+local UIModule = {}
+function UIModule:GetScreenCenter()
+    return Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+end
+
+function UIModule:CreateFOVCircle()
+    return Utils:CreateDrawing("Circle", {
+        Radius = State.FOVRadius,
+        Thickness = 2,
+        Color = Color3.fromRGB(170, 0, 255),
+        Filled = false,
+        Visible = State.FOVEnabled,
+        Position = self:GetScreenCenter()
+    })
+end
+
+function UIModule:UpdateFOVCircle()
+    if not State.FOVCircle then State.FOVCircle = self:CreateFOVCircle() end
+    if State.FOVCircle then
+        State.FOVCircle.Visible = State.FOVEnabled
+        State.FOVCircle.Radius = State.FOVRadius
+        State.FOVCircle.Position = self:GetScreenCenter()
+    end
+end
+
+-- Aim Assist (exatamente igual)
+local AimModule = {}
+
+function AimModule:GetClosestTarget()
+    local closestTarget = nil
+    local closestDistance = State.FOVRadius
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("Head") then
+            if Utils:IsSameTeam(LocalPlayer, player) then continue end
+            if not Utils:IsVisible(player) then continue end
+            local screenPos, onScreen = Camera:WorldToViewportPoint(player.Character.Head.Position)
+            if onScreen then
+                local distance = (Vector2.new(screenPos.X, screenPos.Y) - UIModule:GetScreenCenter()).Magnitude
+                if distance < closestDistance then
+                    closestDistance = distance
+                    closestTarget = player
+                end
+            end
+        end
+    end
+    return closestTarget
+end
+
+function AimModule:UpdateTarget()
+    if not State.AimEnabled or not State.FOVEnabled then
+        State.Target = nil
+        return
+    end
+    State.Target = self:GetClosestTarget()
+end
+
+function AimModule:AimAtTarget()
+    if not State.Target or not State.AimEnabled or not State.FOVEnabled then return end
+    local target = State.Target
+    if target and target.Character and target.Character:FindFirstChild("Head") then
+        local headPos = target.Character.Head.Position
+        Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, headPos)
+    end
+end
+
+-- ESP (exatamente igual)
+local ESPModule = {}
+
+function ESPModule:CreateESP(player)
+    if State.DrawingObjects[player] then return end
+    local box = Utils:CreateDrawing("Square", {
+        Color = Utils:GetTeamColor(player),
+        Thickness = 2,
+        Filled = false,
+        Transparency = 1,
+        Visible = false
+    })
+    if box then
+        State.DrawingObjects[player] = {Box = box, LastUpdate = 0}
+    end
+end
+
+function ESPModule:RemoveESP(player)
+    if State.DrawingObjects[player] then
+        if State.DrawingObjects[player].Box then
+            pcall(function() State.DrawingObjects[player].Box:Remove() end)
+        end
+        State.DrawingObjects[player] = nil
+    end
+end
+
+function ESPModule:UpdateESP(player)
+    if not State.ESPEnabled then
+        if State.DrawingObjects[player] then self:RemoveESP(player) end
+        return
+    end
+    if player == LocalPlayer then return end
+    if not player.Character then return end
+    if not State.DrawingObjects[player] then self:CreateESP(player) end
+    local esp = State.DrawingObjects[player]
+    if not esp or not esp.Box then return end
+    local character = player.Character
+    local humanoid = character:FindFirstChild("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not rootPart or humanoid.Health <= 0 then
+        esp.Box.Visible = false
+        return
+    end
+    esp.Box.Color = Utils:GetTeamColor(player)
+    local topPos, topOnScreen = Camera:WorldToViewportPoint((rootPart.Position + Vector3.new(0, 3, 0)))
+    local bottomPos, bottomOnScreen = Camera:WorldToViewportPoint((rootPart.Position - Vector3.new(0, 3, 0)))
+    if topOnScreen and bottomOnScreen then
+        local height = math.abs(topPos.Y - bottomPos.Y)
+        local width = height * 0.6
+        local centerX = topPos.X
+        esp.Box.Position = Vector2.new(centerX - width/2, topPos.Y)
+        esp.Box.Size = Vector2.new(width, height)
+        esp.Box.Visible = true
+    else
+        esp.Box.Visible = false
+    end
+end
+
+-- Rayfield UI
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "PRISION LIFE",
+    LoadingTitle = "Carregando...",
+    LoadingSubtitle = "@GuizinScript",
+    ConfigurationSaving = {Enabled = false}
+})
+
+local Tab = Window:CreateTab("Main", 4483362458)
+
+Tab:CreateSection("Features")
+
+Tab:CreateToggle({
+    Name = "AIM ASSIST",
+    CurrentValue = false,
+    Callback = function(Value)
+        State.AimEnabled = Value
+    end
+})
+
+Tab:CreateToggle({
+    Name = "ESP",
+    CurrentValue = false,
+    Callback = function(Value)
+        State.ESPEnabled = Value
+        if not Value then
+            for player, _ in pairs(State.DrawingObjects) do
+                ESPModule:RemoveESP(player)
+            end
+        end
+    end
+})
+
+Tab:CreateToggle({
+    Name = "FOV",
+    CurrentValue = false,
+    Callback = function(Value)
+        State.FOVEnabled = Value
+        if State.FOVCircle then
+            State.FOVCircle.Visible = Value
+        end
+    end
+})
+
+Tab:CreateSection("FOV Config")
+
+Tab:CreateSlider({
+    Name = "FOV RADIUS",
+    Range = {10, 300},
+    Increment = 5,
+    Suffix = "",
+    CurrentValue = 50,
+    Callback = function(Value)
+        State.FOVRadius = Value
+        if State.FOVCircle then
+            State.FOVCircle.Radius = Value
+        end
+    end
+})
+
+-- Inicialização (igual ao seu)
+State.FOVCircle = UIModule:CreateFOVCircle()
+
+for _, player in ipairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer then
+        ESPModule:CreateESP(player)
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    if player ~= LocalPlayer then
+        ESPModule:CreateESP(player)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    ESPModule:RemoveESP(player)
+end)
+
+-- Loop principal (igual)
+RunService.RenderStepped:Connect(function()
+    UIModule:UpdateFOVCircle()
+    AimModule:UpdateTarget()
+    if State.AimEnabled and State.FOVEnabled and State.Target then
+        AimModule:AimAtTarget()
+    end
+    if State.ESPEnabled then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                pcall(function()
+                    ESPModule:UpdateESP(player)
+                end)
+            end
+        end
+    end
+end)
+
+-- Tecla K (como no original)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.K then
+        Rayfield:Notify({
+            Title = "PRISION LIFE HUB",
+            Content = "Menu Rayfield aberto!\nUse os toggles acima.",
+            Duration = 4
+        })
+    end
+end)
+
+Rayfield:Notify({
+    Title = "Hub Carregado!",
+    Content = "Tecla K para lembrete | Feito por Nicolas",
+    Duration = 6
+})
